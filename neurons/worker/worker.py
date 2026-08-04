@@ -129,9 +129,18 @@ SEND_TIMEOUT = 30  # seconds
 MAX_RETRIES = 3
 RETRY_BACKOFF = 1.0  # Base backoff in seconds
 FETCH_STREAM_CHUNK_SIZE = 64 * 1024
+# Pipe fetch->send instead of buffering the whole chunk before uploading. Only applies to the
+# object-storage presigned-PUT path (chunk_sha256 header path needs the full buffer up front
+# regardless). Hash mismatches are then caught after the upload lands instead of before it starts;
+# BeamCore's PRISM verification still catches bad chunks server-side, so this trades "reject before
+# upload" for "reject after upload" in exchange for send/fetch overlap. Default off until validated.
+WORKER_STREAM_UPLOADS = os.environ.get("WORKER_STREAM_UPLOADS", "false").strip().lower() in (
+    "1", "true", "yes",
+)
 WS_TASK_RESULT_ACK_TIMEOUT = float(os.environ.get("WORKER_TASK_RESULT_ACK_TIMEOUT", "3.0"))
 WS_TASK_RESULT_SEND_ATTEMPTS = max(3, int(os.environ.get("WORKER_TASK_RESULT_SEND_ATTEMPTS", "8")))
 WS_TASK_RESULT_RECONNECT_WAIT_SECONDS = max(0.0, float(os.environ.get("WORKER_TASK_RESULT_RECONNECT_WAIT_SECONDS", "2.0")))
+WORKER_MAX_CONCURRENT_TASKS = max(1, int(os.environ.get("WORKER_MAX_CONCURRENT_TASKS", "1")))
 TASK_RESULT_ACK_STATUSES = {
     "owned_processing",
     "completed",
@@ -163,7 +172,7 @@ class WorkerState:
     pending_task_results: Dict[str, asyncio.Future] = field(default_factory=dict)
     active_ws_task_ids: set[str] = field(default_factory=set)
     ws_offer_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
-    ws_executor_task: Optional[asyncio.Task] = None
+    ws_executor_tasks: list = field(default_factory=list)
     active_websocket: Optional[Any] = None
 
 
@@ -729,6 +738,105 @@ async def send_chunk(
     raise Exception("Max retries exceeded")
 
 
+async def stream_fetch_and_send(
+    client: httpx.AsyncClient,
+    source_url: str,
+    destination_url: str,
+    expected_bytes: int,
+    offer_source_headers: Optional[dict] = None,
+    offer_dest_headers: Optional[dict] = None,
+    task_id: str = None,
+    offer_id: str = None,
+    chunk_index: int = 0,
+) -> tuple:
+    """Pipe the source GET directly into the destination PUT body instead of buffering.
+
+    Object-storage presigned-PUT path only (see WORKER_STREAM_UPLOADS). Hashes on the fly and
+    declares Content-Length up front from the offer's chunk_size so the presigned PUT doesn't need
+    chunked transfer encoding. If the source yields a different number of bytes than declared, the
+    upload is aborted rather than silently sent short/long.
+
+    Fetch and send happen concurrently by design (that's the point), so fetch_ms/send_ms here don't
+    mean the same thing as the buffered path's independent phases: fetch_ms is wall-clock time until
+    the last source byte was relayed (bounded by whichever of source/destination is slower, since
+    the destination write applies backpressure on how fast the source is drained), and send_ms is
+    the tail time spent finishing the upload after the source was exhausted. hash_ms is real CPU
+    time in hashlib.update(), independent of either.
+
+    Returns: (bytes_transferred, computed_sha256_hex, etag, response_code, fetch_ms, hash_ms, send_ms, total_ms)
+    """
+    src_headers = {"ngrok-skip-browser-warning": "true"}
+    if offer_source_headers:
+        src_headers.update(offer_source_headers)
+
+    dest_headers = {"Content-Type": "application/octet-stream"}
+    if expected_bytes:
+        dest_headers["Content-Length"] = str(expected_bytes)
+    if offer_dest_headers:
+        dest_headers.update(offer_dest_headers)
+
+    for attempt in range(MAX_RETRIES):
+        hasher = hashlib.sha256()
+        total = 0
+        hash_ms_accum = 0.0
+        fetch_ms = 0.0
+        size_error: Optional[str] = None
+        chunk_started = time.perf_counter()
+
+        async def body_stream():
+            nonlocal total, size_error, hash_ms_accum, fetch_ms
+            async with client.stream(
+                "GET", source_url, headers=src_headers, timeout=FETCH_TIMEOUT
+            ) as response:
+                if response.status_code not in (200, 206):
+                    response.raise_for_status()
+                async for piece in response.aiter_bytes(chunk_size=FETCH_STREAM_CHUNK_SIZE):
+                    total += len(piece)
+                    if expected_bytes and total > expected_bytes:
+                        size_error = f"response exceeded expected size while streaming: {total} > {expected_bytes}"
+                        raise ValueError(size_error)
+                    hash_started = time.perf_counter()
+                    hasher.update(piece)
+                    hash_ms_accum += (time.perf_counter() - hash_started) * 1000
+                    yield piece
+            if expected_bytes and total != expected_bytes:
+                size_error = f"source returned {total} bytes, expected {expected_bytes}"
+                raise ValueError(size_error)
+            fetch_ms = (time.perf_counter() - chunk_started) * 1000
+
+        try:
+            response = await client.put(
+                destination_url, content=body_stream(), headers=dest_headers, timeout=SEND_TIMEOUT
+            )
+            response.raise_for_status()
+            etag = response.headers.get("ETag") or response.headers.get("etag")
+            total_ms = (time.perf_counter() - chunk_started) * 1000
+            send_ms = max(0.0, total_ms - fetch_ms)
+            return (
+                total, hasher.hexdigest(), etag, response.status_code,
+                round(fetch_ms, 1), round(hash_ms_accum, 1), round(send_ms, 1), round(total_ms, 1),
+            )
+
+        except Exception as e:
+            can_retry = is_retryable(e) and attempt < MAX_RETRIES - 1
+            if not can_retry:
+                print(
+                    "[Worker] Streamed upload failed "
+                    f"task={task_label(task_id)} offer={task_label(offer_id)} "
+                    f"chunk={chunk_index} error={size_error or exception_detail(e)}{http_status_detail(e)}"
+                )
+                raise
+            print(
+                "[Worker] Streamed upload retry "
+                f"task={task_label(task_id)} offer={task_label(offer_id)} "
+                f"chunk={chunk_index} attempt={attempt + 1}/{MAX_RETRIES} "
+                f"error={size_error or exception_detail(e)}{http_status_detail(e)}"
+            )
+            await asyncio.sleep(RETRY_BACKOFF * (2**attempt))
+
+    raise Exception("Max retries exceeded")
+
+
 async def execute_transfer(
     state: WorkerState,
     task_id: str,
@@ -761,6 +869,9 @@ async def execute_transfer(
     client = state.http_client
     total_bytes = 0
     is_canary = is_canary_destination(destination_url)
+    use_streaming = (
+        WORKER_STREAM_UPLOADS and not is_canary and is_object_storage_presigned_url(destination_url)
+    )
     computed_chunk_hash = ""
     last_etag: Optional[str] = None
     offer_id = task_message.get("offer_id") or task_id
@@ -768,7 +879,8 @@ async def execute_transfer(
 
     print(
         f"[Worker] Transferring signed range bytes={range_start}-{range_end} "
-        f"task={task_label(task_id)} offer={task_label(offer_id)} hotkey={hotkey[:16]}"
+        f"task={task_label(task_id)} offer={task_label(offer_id)} hotkey={hotkey[:16]} "
+        f"mode={'stream' if use_streaming else 'buffered'}"
     )
 
     try:
@@ -785,77 +897,123 @@ async def execute_transfer(
                     last_etag,
                 )
 
-        chunk_started = time.perf_counter()
-        fetch_started = time.perf_counter()
-        data = await fetch_chunk(
-            client,
-            source_url,
-            expected_max_bytes=chunk_size,
-            task_id=task_id,
-            offer_id=offer_id,
-            chunk_index=chunk_index,
-            offer_source_headers=source_headers_offer or None,
-        )
-        fetch_ms = (time.perf_counter() - fetch_started) * 1000
-
-        bytes_fetched = len(data)
-        if bytes_fetched != chunk_size:
-            return (
-                total_bytes,
-                False,
-                f"source range returned {bytes_fetched} bytes, expected {chunk_size}",
-                "",
-                last_etag,
-            )
-
-        hash_started = time.perf_counter()
-        computed_chunk_hash = hashlib.sha256(data).hexdigest()
-        hash_ms = (time.perf_counter() - hash_started) * 1000
-
-        expected_chunk_hash = chunk_hashes.get(chunk_index) or ""
-        if (
-            expected_chunk_hash
-            and computed_chunk_hash
-            and expected_chunk_hash.lower() != computed_chunk_hash.lower()
-        ):
-            return (
-                total_bytes,
-                False,
-                f"Chunk {chunk_index} hash mismatch",
-                computed_chunk_hash,
-                last_etag,
-            )
-
-        if is_canary:
-            print(f"[Worker] Chunk {chunk_index}: CANARY mode, skipping upload")
-            total_bytes += bytes_fetched
-        else:
-            send_started = time.perf_counter()
-            _send_success, etag, response_code = await send_chunk(
+        if use_streaming:
+            (
+                bytes_fetched, computed_chunk_hash, etag, response_code,
+                fetch_ms, hash_ms, send_ms, total_ms,
+            ) = await stream_fetch_and_send(
                 client,
+                source_url,
                 destination_url,
-                data,
-                transfer_id,
-                chunk_index,
-                chunk_offset=range_start,
-                total_size=chunk_size,
+                expected_bytes=chunk_size,
+                offer_source_headers=source_headers_offer or None,
+                offer_dest_headers=dest_headers_offer or None,
                 task_id=task_id,
                 offer_id=offer_id,
-                offer_dest_headers=dest_headers_offer or None,
+                chunk_index=chunk_index,
             )
-            send_ms = (time.perf_counter() - send_started) * 1000
             if etag:
                 last_etag = etag
-
             total_bytes += bytes_fetched
-            total_ms = (time.perf_counter() - chunk_started) * 1000
+
+            # Hash is only known once the streamed upload has already landed. A mismatch here
+            # means the upload already happened; BeamCore's server-side verification (PRISM)
+            # is what actually rejects a bad chunk, same as it would for any other integrity
+            # failure -- this just moves the local check to after the transfer instead of before.
+            expected_chunk_hash = chunk_hashes.get(chunk_index) or ""
+            if (
+                expected_chunk_hash
+                and computed_chunk_hash
+                and expected_chunk_hash.lower() != computed_chunk_hash.lower()
+            ):
+                return (
+                    total_bytes,
+                    False,
+                    f"Chunk {chunk_index} hash mismatch (post-upload, streamed)",
+                    computed_chunk_hash,
+                    last_etag,
+                )
+
             mbps = (bytes_fetched * 8 / 1_000_000) / (total_ms / 1000) if total_ms > 0 else 0
             print(
-                f"[Worker] Chunk {chunk_index}: {bytes_fetched} bytes transferred "
+                f"[Worker] Chunk {chunk_index}: {bytes_fetched} bytes transferred (streamed) "
                 f"task={task_label(task_id)} offer={task_label(offer_id)} "
                 f"fetch_ms={fetch_ms:.1f} hash_ms={hash_ms:.1f} send_ms={send_ms:.1f} "
                 f"total_ms={total_ms:.1f} mbps={mbps:.1f} response={response_code}"
             )
+
+        else:
+            chunk_started = time.perf_counter()
+            fetch_started = time.perf_counter()
+            data = await fetch_chunk(
+                client,
+                source_url,
+                expected_max_bytes=chunk_size,
+                task_id=task_id,
+                offer_id=offer_id,
+                chunk_index=chunk_index,
+                offer_source_headers=source_headers_offer or None,
+            )
+            fetch_ms = (time.perf_counter() - fetch_started) * 1000
+
+            bytes_fetched = len(data)
+            if bytes_fetched != chunk_size:
+                return (
+                    total_bytes,
+                    False,
+                    f"source range returned {bytes_fetched} bytes, expected {chunk_size}",
+                    "",
+                    last_etag,
+                )
+
+            hash_started = time.perf_counter()
+            computed_chunk_hash = hashlib.sha256(data).hexdigest()
+            hash_ms = (time.perf_counter() - hash_started) * 1000
+
+            expected_chunk_hash = chunk_hashes.get(chunk_index) or ""
+            if (
+                expected_chunk_hash
+                and computed_chunk_hash
+                and expected_chunk_hash.lower() != computed_chunk_hash.lower()
+            ):
+                return (
+                    total_bytes,
+                    False,
+                    f"Chunk {chunk_index} hash mismatch",
+                    computed_chunk_hash,
+                    last_etag,
+                )
+
+            if is_canary:
+                print(f"[Worker] Chunk {chunk_index}: CANARY mode, skipping upload")
+                total_bytes += bytes_fetched
+            else:
+                send_started = time.perf_counter()
+                _send_success, etag, response_code = await send_chunk(
+                    client,
+                    destination_url,
+                    data,
+                    transfer_id,
+                    chunk_index,
+                    chunk_offset=range_start,
+                    total_size=chunk_size,
+                    task_id=task_id,
+                    offer_id=offer_id,
+                    offer_dest_headers=dest_headers_offer or None,
+                )
+                send_ms = (time.perf_counter() - send_started) * 1000
+                if etag:
+                    last_etag = etag
+
+                total_bytes += bytes_fetched
+                total_ms = (time.perf_counter() - chunk_started) * 1000
+                mbps = (bytes_fetched * 8 / 1_000_000) / (total_ms / 1000) if total_ms > 0 else 0
+                print(
+                    f"[Worker] Chunk {chunk_index}: {bytes_fetched} bytes transferred "
+                    f"task={task_label(task_id)} offer={task_label(offer_id)} "
+                    f"fetch_ms={fetch_ms:.1f} hash_ms={hash_ms:.1f} send_ms={send_ms:.1f} "
+                    f"total_ms={total_ms:.1f} mbps={mbps:.1f} response={response_code}"
+                )
 
     except asyncio.TimeoutError as e:
         detail = exception_detail(e)
@@ -1088,8 +1246,12 @@ def enqueue_ws_task(state: WorkerState, websocket, task: dict) -> None:
     )
 
 
-async def ws_task_executor(state: WorkerState) -> None:
-    """Execute queued offers one at a time, in arrival order."""
+async def ws_task_executor(state: WorkerState, worker_index: int = 0) -> None:
+    """Execute queued offers from the shared queue until a shutdown sentinel arrives.
+
+    With WORKER_MAX_CONCURRENT_TASKS > 1, multiple instances of this coroutine run
+    concurrently, each pulling from the same ws_offer_queue (worker-pool pattern).
+    """
     while True:
         item = await state.ws_offer_queue.get()
         try:
@@ -1103,7 +1265,7 @@ async def ws_task_executor(state: WorkerState) -> None:
             task_id = task.get("task_id") or task.get("offer_id")
             offer_id = task.get("offer_id") or task_id
             print(
-                f"[Worker] [WS] Sequential task executor error: "
+                f"[Worker] [WS] Task executor[{worker_index}] error: "
                 f"task={task_label(task_id)} offer={task_label(offer_id)} "
                 f"error={type(exc).__name__}: {exc}"
             )
@@ -1327,11 +1489,17 @@ async def run_worker(state: WorkerState):
     wallet = state.wallet
     hotkey = wallet.hotkey.ss58_address
 
-    # Create HTTP client
+    # Create HTTP client. http2=True lets requests to R2/S3/GCS (all HTTP/2-capable) skip a
+    # round trip of per-request overhead; falls back to HTTP/1.1 for any endpoint that doesn't
+    # support it. Requires the 'h2' package (see pyproject.toml).
     state.http_client = httpx.AsyncClient(
         timeout=httpx.Timeout(connect=10.0, read=60.0, write=60.0, pool=5.0),
+        http2=True,
     )
-    state.ws_executor_task = asyncio.create_task(ws_task_executor(state))
+    state.ws_executor_tasks = [
+        asyncio.create_task(ws_task_executor(state, worker_index=i))
+        for i in range(WORKER_MAX_CONCURRENT_TASKS)
+    ]
 
     try:
         async with httpx.AsyncClient() as client:
@@ -1361,12 +1529,14 @@ async def run_worker(state: WorkerState):
         print(f"[Worker] Error: {e}")
         raise
     finally:
-        if state.ws_executor_task is not None:
+        if state.ws_executor_tasks:
             pending_count = state.ws_offer_queue.qsize()
             if pending_count:
-                print(f"[Worker] Waiting for {pending_count} queued task(s) to finish sequentially")
-            await state.ws_offer_queue.put(None)
-            await state.ws_executor_task
+                print(f"[Worker] Waiting for {pending_count} queued task(s) to finish")
+            for _ in state.ws_executor_tasks:
+                await state.ws_offer_queue.put(None)
+            await asyncio.gather(*state.ws_executor_tasks, return_exceptions=True)
+            state.ws_executor_tasks = []
             state.ws_executor_task = None
         if state.http_client:
             await state.http_client.aclose()
@@ -1450,7 +1620,10 @@ async def main():
         print(f"Worker gateway URL: {worker_gateway_url}")
     else:
         print("Worker gateway URL: MISSING")
-    print("Worker execution: sequential FIFO (one task at a time), offer_queue=unbounded")
+    if WORKER_MAX_CONCURRENT_TASKS > 1:
+        print(f"Worker execution: {WORKER_MAX_CONCURRENT_TASKS} concurrent task slots, offer_queue=unbounded")
+    else:
+        print("Worker execution: sequential FIFO (one task at a time), offer_queue=unbounded")
     print()
 
     # Create worker state

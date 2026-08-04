@@ -1,0 +1,412 @@
+<title>Beam Fleet Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root {
+    --bg: #0b0d12;
+    --bg-elev: #12151d;
+    --bg-elev-2: #171b26;
+    --border: #232838;
+    --text: #e6e9f0;
+    --text-dim: #8b93a7;
+    --text-faint: #565f74;
+    --accent: #6ee7b7;
+    --accent-dim: #2dd4bf;
+    --blue: #7dd3fc;
+    --amber: #fbbf24;
+    --red: #f87171;
+    --mono: "SF Mono", "Cascadia Code", Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap {
+    max-width: 1280px;
+    margin: 0 auto;
+    padding: 28px 20px 60px;
+  }
+  header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+  h1 {
+    font-size: 20px;
+    font-weight: 650;
+    margin: 0;
+    letter-spacing: -0.01em;
+  }
+  h1 span { color: var(--accent); }
+  .subtitle {
+    color: var(--text-dim);
+    font-size: 13px;
+    margin-top: 4px;
+  }
+  .status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12.5px;
+    color: var(--text-dim);
+    font-family: var(--mono);
+  }
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-faint);
+    flex: none;
+  }
+  .dot.on { background: var(--accent); box-shadow: 0 0 8px rgba(110,231,183,.6); }
+  .dot.off { background: var(--red); box-shadow: 0 0 8px rgba(248,113,113,.5); }
+  .dot.warn { background: var(--amber); box-shadow: 0 0 8px rgba(251,191,36,.5); }
+
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin-bottom: 28px;
+  }
+  .card {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px 18px;
+  }
+  .card .label {
+    font-size: 11.5px;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: var(--text-faint);
+    margin-bottom: 8px;
+  }
+  .card .value {
+    font-size: 26px;
+    font-weight: 650;
+    font-family: var(--mono);
+    letter-spacing: -0.02em;
+  }
+  .card .value small { font-size: 14px; color: var(--text-dim); font-weight: 500; }
+  .card .foot { font-size: 12px; color: var(--text-dim); margin-top: 6px; }
+
+  section { margin-bottom: 32px; }
+  h2 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: .07em;
+    color: var(--text-dim);
+    margin: 0 0 12px;
+    font-weight: 600;
+  }
+
+  .worker-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+    gap: 10px;
+  }
+  .worker-card {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 16px;
+    transition: border-color .2s;
+  }
+  .worker-card.stale { opacity: .55; }
+  .worker-card .wc-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+  }
+  .worker-card .wc-name {
+    font-family: var(--mono);
+    font-weight: 600;
+    font-size: 14px;
+  }
+  .worker-card .wc-hotkey {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-faint);
+  }
+  .worker-card .wc-meta {
+    display: flex;
+    gap: 12px;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--text-faint);
+    margin-bottom: 10px;
+    padding-bottom: 10px;
+    border-bottom: 1px dashed var(--border);
+  }
+  .badge {
+    font-size: 10px;
+    font-family: var(--mono);
+    padding: 2px 7px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    letter-spacing: .02em;
+  }
+  .badge.stream { color: var(--blue); border-color: rgba(125,211,252,.35); background: rgba(125,211,252,.08); }
+  .wc-stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px 12px;
+    font-size: 12px;
+    color: var(--text-dim);
+    font-family: var(--mono);
+  }
+  .wc-stats b { color: var(--text); font-weight: 600; }
+  .wc-bars { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; }
+  .bar-row { display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--text-faint); font-family: var(--mono); }
+  .bar-track { flex: 1; height: 5px; background: var(--bg-elev-2); border-radius: 3px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 3px; }
+  .bar-fill.fetch { background: var(--blue); }
+  .bar-fill.hash { background: var(--text-faint); }
+  .bar-fill.send { background: var(--amber); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  thead th {
+    text-align: left;
+    font-weight: 600;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    font-size: 10.5px;
+    letter-spacing: .05em;
+    padding: 0 10px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  tbody td {
+    padding: 9px 10px;
+    border-bottom: 1px solid var(--border);
+    font-family: var(--mono);
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody td.w-name { color: var(--text); font-weight: 600; }
+  .table-wrap {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow-x: auto;
+    padding: 14px 6px;
+  }
+  .mode-tag { font-size: 10px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border); }
+  .mode-tag.stream { color: var(--blue); border-color: rgba(125,211,252,.35); }
+  .empty { color: var(--text-faint); font-size: 12.5px; padding: 20px; text-align: center; }
+
+  footer {
+    text-align: center;
+    color: var(--text-faint);
+    font-size: 11.5px;
+    font-family: var(--mono);
+    margin-top: 20px;
+  }
+
+  ::-webkit-scrollbar { height: 8px; width: 8px; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+</style>
+
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Beam <span>Fleet</span> Dashboard</h1>
+      <div class="subtitle" id="subtitle">connecting…</div>
+    </div>
+    <div class="status-pill"><span class="dot" id="conn-dot"></span><span id="conn-text">connecting</span></div>
+  </header>
+
+  <div class="cards" id="summary-cards"></div>
+
+  <section>
+    <h2>Workers</h2>
+    <div class="worker-grid" id="worker-grid"></div>
+  </section>
+
+  <section>
+    <h2>Recent Transfers</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Worker</th><th>Task</th><th>Bytes</th><th>Fetch</th><th>Hash</th><th>Send</th><th>Total</th><th>Mbps</th><th>Mode</th><th>Age</th></tr>
+        </thead>
+        <tbody id="events-body"></tbody>
+      </table>
+      <div class="empty" id="events-empty" style="display:none">No transfers observed yet</div>
+    </div>
+  </section>
+
+  <footer id="footer"></footer>
+</div>
+
+<script>
+const fmtBytes = (n) => {
+  if (n == null) return "—";
+  const u = ["B","KB","MB","GB","TB"];
+  let i = 0, v = n;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return v.toFixed(v < 10 && i > 0 ? 2 : 1) + " " + u[i];
+};
+const fmtMs = (n) => n == null ? "—" : (n >= 1000 ? (n/1000).toFixed(2) + "s" : Math.round(n) + "ms");
+const fmtMbps = (n) => n == null ? "—" : n.toFixed(1);
+const fmtAge = (ts) => {
+  if (!ts) return "—";
+  const s = Math.max(0, (Date.now()/1000) - ts);
+  if (s < 60) return Math.round(s) + "s ago";
+  if (s < 3600) return Math.round(s/60) + "m ago";
+  return Math.round(s/3600) + "h ago";
+};
+const esc = (s) => (s ?? "").toString().replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+function renderCards(data) {
+  const o = data.orchestrator || {};
+  const gw = o.gateway || {};
+  const t = data.totals || {};
+  const ready = o.ready?.ready;
+  const healthy = o.health?.status === "healthy";
+
+  const cards = [
+    {
+      label: "Orchestrator",
+      value: healthy ? "Healthy" : (o.reachable ? "Degraded" : "Unreachable"),
+      foot: o.state ? `${(o.state.hotkey || "").slice(0,10)}…  ·  epoch ${o.state.current_epoch ?? "—"}` : "",
+      dot: healthy ? "on" : "off",
+    },
+    {
+      label: "Routing (ready)",
+      value: ready ? "Yes" : "No",
+      foot: ready ? "receiving offers" : "waiting on workers",
+      dot: ready ? "on" : "warn",
+    },
+    {
+      label: "Gateway capacity",
+      value: `${gw.connected ?? "—"}<small>/${gw.max_workers ?? "—"}</small>`,
+      foot: "connected worker sessions",
+      dot: gw.connected > 0 ? "on" : "off",
+    },
+    {
+      label: "Workers online",
+      value: `${t.workers_online ?? 0}<small>/${t.workers_total ?? 0}</small>`,
+      foot: "systemd active",
+      dot: t.workers_online === t.workers_total ? "on" : "warn",
+    },
+    {
+      label: "Tasks completed",
+      value: t.tasks_completed ?? 0,
+      foot: t.tasks_failed ? `${t.tasks_failed} failed` : "0 failed",
+      dot: "on",
+    },
+    {
+      label: "Data relayed",
+      value: fmtBytes(t.total_bytes),
+      foot: t.avg_mbps != null ? `avg ${t.avg_mbps} Mbps` : "no transfers yet",
+      dot: "on",
+    },
+  ];
+
+  document.getElementById("summary-cards").innerHTML = cards.map(c => `
+    <div class="card">
+      <div class="label"><span class="dot ${c.dot}" style="margin-right:6px"></span>${c.label}</div>
+      <div class="value">${c.value}</div>
+      <div class="foot">${c.foot}</div>
+    </div>
+  `).join("");
+}
+
+function renderWorkers(data) {
+  const workers = data.workers || [];
+  document.getElementById("worker-grid").innerHTML = workers.map(w => {
+    const active = w.systemd_active === "active";
+    const dot = active ? "on" : "off";
+    const maxBar = Math.max(w.avg_fetch_ms || 0, w.avg_hash_ms || 0, w.avg_send_ms || 0, 1);
+    const bar = (label, val, cls) => val == null ? "" : `
+      <div class="bar-row">
+        <span style="width:34px">${label}</span>
+        <div class="bar-track"><div class="bar-fill ${cls}" style="width:${Math.max(4, (val/maxBar)*100)}%"></div></div>
+        <span>${fmtMs(val)}</span>
+      </div>`;
+    return `
+    <div class="worker-card ${active ? "" : "stale"}">
+      <div class="wc-head">
+        <div>
+          <div class="wc-name"><span class="dot ${dot}" style="margin-right:6px"></span>${w.name}</div>
+          <div class="wc-hotkey">${esc(w.hotkey_name)}</div>
+        </div>
+        <span class="badge ${w.stream_mode ? "stream" : ""}">${w.stream_mode ? "stream" : "buffered"} ×${w.concurrency}</span>
+      </div>
+      <div class="wc-meta" title="${esc(w.worker_id) || ""}">
+        <span>id ${w.worker_id ? esc(w.worker_id.slice(0,8)) + "…" : "—"}</span>
+        <span>ip ${esc(w.public_ip) || "—"}</span>
+      </div>
+      <div class="wc-stats">
+        <div>done <b>${w.tasks_completed}</b></div>
+        <div>failed <b>${w.tasks_failed}</b></div>
+        <div>bytes <b>${fmtBytes(w.total_bytes)}</b></div>
+        <div>mbps <b>${fmtMbps(w.avg_mbps)}</b></div>
+      </div>
+      <div class="wc-bars">
+        ${bar("fetch", w.avg_fetch_ms, "fetch")}
+        ${bar("hash", w.avg_hash_ms, "hash")}
+        ${bar("send", w.avg_send_ms, "send")}
+      </div>
+    </div>`;
+  }).join("");
+}
+
+function renderEvents(data) {
+  const events = data.recent_events || [];
+  const body = document.getElementById("events-body");
+  const empty = document.getElementById("events-empty");
+  if (!events.length) {
+    body.innerHTML = "";
+    empty.style.display = "block";
+    return;
+  }
+  empty.style.display = "none";
+  body.innerHTML = events.map(e => `
+    <tr>
+      <td class="w-name">${esc(e.worker)}</td>
+      <td title="offer=${esc(e.offer)}">${esc(e.task) || "—"}</td>
+      <td>${fmtBytes(e.bytes)}</td>
+      <td>${fmtMs(e.fetch_ms)}</td>
+      <td>${fmtMs(e.hash_ms)}</td>
+      <td>${fmtMs(e.send_ms)}</td>
+      <td>${fmtMs(e.total_ms)}</td>
+      <td>${fmtMbps(e.mbps)}</td>
+      <td><span class="mode-tag ${e.streamed ? "stream" : ""}">${e.streamed ? "stream" : "buffered"}</span></td>
+      <td>${fmtAge(e.ts)}</td>
+    </tr>
+  `).join("");
+}
+
+async function refresh() {
+  try {
+    const res = await fetch("/api/summary", { cache: "no-store" });
+    const data = await res.json();
+    renderCards(data);
+    renderWorkers(data);
+    renderEvents(data);
+    document.getElementById("conn-dot").className = "dot on";
+    document.getElementById("conn-text").textContent = "live";
+    document.getElementById("subtitle").textContent =
+      data.orchestrator?.reachable ? "polling orchestrator + worker journals every few seconds" : "orchestrator unreachable";
+    document.getElementById("footer").textContent =
+      "updated " + new Date(data.generated_at * 1000).toLocaleTimeString();
+  } catch (e) {
+    document.getElementById("conn-dot").className = "dot off";
+    document.getElementById("conn-text").textContent = "disconnected";
+  }
+}
+
+refresh();
+setInterval(refresh, 4000);
+</script>

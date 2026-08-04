@@ -73,6 +73,21 @@ async def readiness_check(
 # =============================================================================
 
 
+@router.get("/gateway/status")
+async def gateway_status(
+    orchestrator: Orchestrator = Depends(lambda: get_orchestrator()),
+):
+    """Real in-process worker-gateway session state (not the BeamCore-synced registry)."""
+    from core.worker_gateway import MAX_WORKERS
+
+    gateway = orchestrator.worker_gateway
+    return {
+        "connected": gateway.connected_count,
+        "max_workers": MAX_WORKERS,
+        "worker_ids": gateway.worker_ids,
+    }
+
+
 @router.get("/status")
 async def get_status(
     orchestrator: Orchestrator = Depends(lambda: get_orchestrator()),

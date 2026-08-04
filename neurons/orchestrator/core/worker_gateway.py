@@ -15,7 +15,7 @@ from typing import Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-MAX_WORKERS = 10
+MAX_WORKERS = max(1, int(os.environ.get("ORCH_MAX_WORKERS", "10")))
 RESULT_FORWARD_RETRY_BASE_SECONDS = max(0.0, float(os.environ.get("ORCH_RESULT_FORWARD_RETRY_BASE_SECONDS", "0.25")))
 RESULT_FORWARD_RETRY_MAX_SECONDS = max(
     RESULT_FORWARD_RETRY_BASE_SECONDS,
