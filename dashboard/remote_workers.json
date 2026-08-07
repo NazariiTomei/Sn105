@@ -1,6 +1,6 @@
 [
   {
-    "name": "worker-m",
+    "name": "worker-1",
     "host": "108.61.242.242",
     "unit": "beam-worker1.service",
     "env_path": "/root/Sn105/neurons/worker/worker1.env",
@@ -8,7 +8,7 @@
     "ssh_user": "root"
   },
   {
-    "name": "worker-n",
+    "name": "worker-2",
     "host": "207.246.117.160",
     "unit": "beam-worker1.service",
     "env_path": "/root/Sn105/neurons/worker/worker1.env",
@@ -16,7 +16,7 @@
     "ssh_user": "root"
   },
   {
-    "name": "worker-q",
+    "name": "worker-3",
     "host": "137.220.62.152",
     "unit": "beam-worker1.service",
     "env_path": "/root/Sn105/neurons/worker/worker1.env",
@@ -24,7 +24,7 @@
     "ssh_user": "root"
   },
   {
-    "name": "worker-r",
+    "name": "worker-4",
     "host": "137.220.60.122",
     "unit": "beam-worker1.service",
     "env_path": "/root/Sn105/neurons/worker/worker1.env",
@@ -32,7 +32,7 @@
     "ssh_user": "root"
   },
   {
-    "name": "worker-t",
+    "name": "worker-5",
     "host": "96.30.194.249",
     "unit": "beam-worker1.service",
     "env_path": "/root/Sn105/neurons/worker/worker1.env",
@@ -40,7 +40,7 @@
     "ssh_user": "root"
   },
   {
-    "name": "worker-u",
+    "name": "worker-6",
     "host": "64.177.121.75",
     "unit": "beam-worker1.service",
     "env_path": "/root/Sn105/neurons/worker/worker1.env",
@@ -48,7 +48,7 @@
     "ssh_user": "root"
   },
   {
-    "name": "worker-v",
+    "name": "worker-7",
     "host": "155.138.175.70",
     "unit": "beam-worker1.service",
     "env_path": "/root/Sn105/neurons/worker/worker1.env",
@@ -56,7 +56,7 @@
     "ssh_user": "root"
   },
   {
-    "name": "worker-w",
+    "name": "worker-8",
     "host": "155.138.219.143",
     "unit": "beam-worker1.service",
     "env_path": "/root/Sn105/neurons/worker/worker1.env",
@@ -64,7 +64,7 @@
     "ssh_user": "root"
   },
   {
-    "name": "worker-x",
+    "name": "worker-9",
     "host": "155.138.225.175",
     "unit": "beam-worker1.service",
     "env_path": "/root/Sn105/neurons/worker/worker1.env",
@@ -72,7 +72,7 @@
     "ssh_user": "root"
   },
   {
-    "name": "worker-y",
+    "name": "worker-10",
     "host": "45.63.79.75",
     "unit": "beam-worker1.service",
     "env_path": "/root/Sn105/neurons/worker/worker1.env",
@@ -80,7 +80,7 @@
     "ssh_user": "root"
   },
   {
-    "name": "worker-z",
+    "name": "worker-11",
     "host": "149.28.120.102",
     "unit": "beam-worker1.service",
     "env_path": "/root/Sn105/neurons/worker/worker1.env",
