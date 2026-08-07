@@ -8,14 +8,6 @@
     "ssh_user": "root"
   },
   {
-    "name": "worker-b",
-    "host": "172.86.107.246",
-    "unit": "beam-worker-b.service",
-    "env_path": "/root/Sn105/neurons/worker/worker-b.env",
-    "ssh_key": "/root/.ssh/dashboard_remote.key",
-    "ssh_user": "root"
-  },
-  {
     "name": "worker-single",
     "host": "5.161.235.253",
     "manager": "pm2",
