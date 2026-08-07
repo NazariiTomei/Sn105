@@ -467,6 +467,46 @@ async def api_summary():
         return JSONResponse(_snapshot)
 
 
+@app.delete("/api/workers/{name}")
+async def remove_worker(name: str):
+    """Stop/disable the worker on its own VPS and drop it from remote_workers.json.
+    Local workers (env-var-configured, not file-backed) aren't removable this way."""
+    workers = _load_remote_workers()
+    match = None
+    remaining = []
+    for w in workers:
+        if w["name"] == name:
+            match = w
+        else:
+            remaining.append(w)
+
+    if match is None:
+        return JSONResponse(
+            {"error": f"worker '{name}' not found in remote_workers.json"}, status_code=404
+        )
+
+    remote = {"host": match["host"], "ssh_key": match["ssh_key"], "ssh_user": match.get("ssh_user", "root")}
+    manager = match.get("manager", "systemd")
+
+    if manager == "pm2":
+        await _run(["pm2", "stop", match["unit"]], remote=remote)
+        await _run(["pm2", "delete", match["unit"]], remote=remote)
+        await _run(["pm2", "save"], remote=remote)
+    else:
+        await _run(["systemctl", "stop", match["unit"]], remote=remote)
+        await _run(["systemctl", "disable", match["unit"]], remote=remote)
+        await _run(["rm", "-f", f"/etc/systemd/system/{match['unit']}"], remote=remote)
+        await _run(["systemctl", "daemon-reload"], remote=remote)
+    await _run(["rm", "-f", match["env_path"]], remote=remote)
+
+    REMOTE_WORKERS_FILE.write_text(json.dumps(remaining, indent=2) + "\n")
+
+    async with _snapshot_lock:
+        _snapshot["workers"] = [w for w in _snapshot.get("workers", []) if w["name"] != name]
+
+    return {"removed": name}
+
+
 @app.get("/")
 async def index():
     return FileResponse(STATIC_DIR / "index.html")
