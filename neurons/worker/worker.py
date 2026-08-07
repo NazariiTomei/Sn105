@@ -1354,11 +1354,11 @@ async def handle_ws_task(state: WorkerState, websocket, task: dict) -> bool:
 
 async def websocket_loop(state: WorkerState):
     """WebSocket communication loop with automatic reconnection."""
-    if not WEBSOCKETS_AVAILABLE:
-        raise RuntimeError("websockets library is required for worker gateway transport")
+    # if not WEBSOCKETS_AVAILABLE:
+    #     raise RuntimeError("websockets library is required for worker gateway transport")
 
-    if not state.worker_gateway_url:
-        raise RuntimeError("WORKER_GATEWAY_URL is required for worker gateway transport")
+    # if not state.worker_gateway_url:
+    #     raise RuntimeError("WORKER_GATEWAY_URL is required for worker gateway transport")
 
     ws_url = get_ws_url(state.worker_id, state.api_key, state.worker_gateway_url)
     print(f"[Worker] Connecting to WebSocket: {ws_url.split('?')[0]}")
@@ -1433,9 +1433,10 @@ async def websocket_loop(state: WorkerState):
                         break
 
         except InvalidStatus as e:
-            print(f"[Worker] [WS] Connection rejected: HTTP {e.status_code}")
+            status_code = get_ws_status_code(e)
+            print(f"[Worker] [WS] Connection rejected: HTTP {status_code}")
             raise RuntimeError(
-                f"worker gateway websocket rejected the connection with HTTP {e.status_code}"
+                f"worker gateway websocket rejected the connection with HTTP {status_code}"
             ) from e
 
         except ConnectionRefusedError:

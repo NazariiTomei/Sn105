@@ -338,7 +338,7 @@ function renderWorkers(data) {
     <div class="worker-card ${active ? "" : "stale"}">
       <div class="wc-head">
         <div>
-          <div class="wc-name"><span class="dot ${dot}" style="margin-right:6px"></span>${w.name}</div>
+          <div class="wc-name"><span class="dot ${dot}" style="margin-right:6px"></span>${w.name}${w.host ? ` <span class="badge" style="margin-left:4px">remote</span>` : ""}</div>
           <div class="wc-hotkey">${esc(w.hotkey_name)}</div>
         </div>
         <span class="badge ${w.stream_mode ? "stream" : ""}">${w.stream_mode ? "stream" : "buffered"} ×${w.concurrency}</span>
