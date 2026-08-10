@@ -40,6 +40,7 @@ class WorkerGateway:
         on_ready_change: Optional[Callable[[bool], None]] = None,
     ) -> None:
         self._sessions: Dict[str, object] = {}
+        self._outstanding: Dict[str, int] = {}
         self._cursor = 0
         self._on_ready_change = on_ready_change
         self._upstream: Optional[object] = None
@@ -67,6 +68,7 @@ class WorkerGateway:
             return False
         was_empty = len(self._sessions) == 0
         self._sessions[worker_id] = ws
+        self._outstanding[worker_id] = 0
         logger.info("Worker connected: %s (%d/%d)", worker_id, len(self._sessions), MAX_WORKERS)
         if was_empty and self._on_ready_change:
             self._on_ready_change(True)
@@ -74,6 +76,7 @@ class WorkerGateway:
 
     def disconnect(self, worker_id: str) -> None:
         self._sessions.pop(worker_id, None)
+        self._outstanding.pop(worker_id, None)
         logger.info("Worker disconnected: %s (%d/%d)", worker_id, len(self._sessions), MAX_WORKERS)
         if len(self._sessions) == 0 and self._on_ready_change:
             self._on_ready_change(False)
@@ -94,22 +97,30 @@ class WorkerGateway:
             return False
         try:
             await ws.send_text(json.dumps({"type": "task_offer", **offer}))
+            self._outstanding[worker_id] = self._outstanding.get(worker_id, 0) + 1
             return True
         except Exception as exc:
             logger.warning("deliver_task_offer send failed for %s: %s", worker_id, exc)
             self._sessions.pop(worker_id, None)
+            self._outstanding.pop(worker_id, None)
             return False
 
-    def get_workers_round_robin(self, n: int = 1) -> list:
-        """Return up to n worker_ids in round-robin order."""
+    def get_least_loaded_workers(self, n: int = 1) -> list:
+        """Return up to n worker_ids, preferring whoever has the fewest in-flight task
+        offers right now. Plain round-robin kept sending the next offer to whichever
+        worker was next in rotation even if it was already backed up (its unbounded
+        offer_queue just keeps growing) while an idle worker sat waiting its turn --
+        that both wastes idle capacity and piles risk onto whichever worker happens to
+        be slow. Ties are broken with the old rotating cursor so equally-loaded workers
+        still get a fair, non-sticky rotation."""
         ids = list(self._sessions.keys())
         if not ids:
             return []
-        selected = []
-        for _ in range(min(n, len(ids))):
-            selected.append(ids[self._cursor % len(ids)])
-            self._cursor += 1
-        return selected
+        start = self._cursor % len(ids)
+        rotated = ids[start:] + ids[:start]
+        self._cursor += 1
+        rotated.sort(key=lambda wid: self._outstanding.get(wid, 0))
+        return rotated[:n]
 
     async def handle_worker_message(self, worker_id: str, raw: str) -> None:
         """Process an inbound message from a connected worker."""
@@ -255,4 +266,6 @@ class WorkerGateway:
             logger.debug("task_result relay already active: task=%s offer=%s worker=%s", task_id, offer_id, worker_id)
             return
 
+        if worker_id in self._outstanding:
+            self._outstanding[worker_id] = max(0, self._outstanding[worker_id] - 1)
         self._schedule_result_forward(worker_id, payload)

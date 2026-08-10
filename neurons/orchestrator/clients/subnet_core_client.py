@@ -699,7 +699,7 @@ class SubnetCoreClient:
         for offer in offers:
             if not isinstance(offer, dict):
                 continue
-            workers = self._worker_gateway.get_workers_round_robin(1)
+            workers = self._worker_gateway.get_least_loaded_workers(1)
             if not workers:
                 logger.warning("No connected local workers for batch %s", batch_id)
                 break
