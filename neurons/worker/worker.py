@@ -128,6 +128,10 @@ FETCH_TIMEOUT = 30  # seconds
 SEND_TIMEOUT = 30  # seconds
 MAX_RETRIES = 3
 RETRY_BACKOFF = 1.0  # Base backoff in seconds
+# Per-attempt soft deadline: an attempt slower than this is cancelled and retried (subject to the
+# same MAX_RETRIES/backoff as any other retryable failure) rather than left to run out FETCH_TIMEOUT
+# or SEND_TIMEOUT, which exist as the hard ceiling for a single HTTP call, not a whole attempt.
+CHUNK_ATTEMPT_TIMEOUT = float(os.environ.get("WORKER_CHUNK_ATTEMPT_TIMEOUT", "4"))  # seconds
 FETCH_STREAM_CHUNK_SIZE = 64 * 1024
 # Pipe fetch->send instead of buffering the whole chunk before uploading. Only applies to the
 # object-storage presigned-PUT path (chunk_sha256 header path needs the full buffer up front
@@ -568,37 +572,40 @@ async def fetch_chunk(
     if offer_source_headers:
         headers.update(offer_source_headers)
 
-    for attempt in range(MAX_RETRIES):
-        try:
-            async with client.stream(
-                "GET", url, headers=headers, timeout=FETCH_TIMEOUT
-            ) as response:
-                if response.status_code not in (200, 206):
-                    response.raise_for_status()
+    async def _do_fetch() -> bytes:
+        async with client.stream(
+            "GET", url, headers=headers, timeout=FETCH_TIMEOUT
+        ) as response:
+            if response.status_code not in (200, 206):
+                response.raise_for_status()
 
-                if expected_max_bytes and expected_max_bytes > 0:
-                    content_length = response.headers.get("Content-Length")
-                    if content_length:
-                        response_size = int(content_length)
-                        if response_size > expected_max_bytes:
-                            raise ValueError(
-                                f"response too large: {response_size} bytes > expected {expected_max_bytes}"
-                            )
-
-                data = bytearray()
-                async for chunk in response.aiter_bytes(chunk_size=FETCH_STREAM_CHUNK_SIZE):
-                    data.extend(chunk)
-                    if (
-                        expected_max_bytes
-                        and expected_max_bytes > 0
-                        and len(data) > expected_max_bytes
-                    ):
+            if expected_max_bytes and expected_max_bytes > 0:
+                content_length = response.headers.get("Content-Length")
+                if content_length:
+                    response_size = int(content_length)
+                    if response_size > expected_max_bytes:
                         raise ValueError(
-                            f"response exceeded expected size while streaming: "
-                            f"{len(data)} bytes > expected {expected_max_bytes}"
+                            f"response too large: {response_size} bytes > expected {expected_max_bytes}"
                         )
 
-                return bytes(data)
+            data = bytearray()
+            async for chunk in response.aiter_bytes(chunk_size=FETCH_STREAM_CHUNK_SIZE):
+                data.extend(chunk)
+                if (
+                    expected_max_bytes
+                    and expected_max_bytes > 0
+                    and len(data) > expected_max_bytes
+                ):
+                    raise ValueError(
+                        f"response exceeded expected size while streaming: "
+                        f"{len(data)} bytes > expected {expected_max_bytes}"
+                    )
+
+            return bytes(data)
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            return await asyncio.wait_for(_do_fetch(), timeout=CHUNK_ATTEMPT_TIMEOUT)
 
         except Exception as e:
             if not is_retryable(e) or attempt == MAX_RETRIES - 1:
@@ -688,25 +695,28 @@ async def send_chunk(
     if offer_dest_headers:
         headers.update(offer_dest_headers)
 
+    async def _do_send():
+        if is_object_storage:
+            response = await client.put(
+                destination_url, content=data, headers=headers, timeout=SEND_TIMEOUT
+            )
+        else:
+            response = await client.post(
+                destination_url, content=data, headers=headers, timeout=SEND_TIMEOUT
+            )
+
+        response.raise_for_status()
+        etag = response.headers.get("ETag") or response.headers.get("etag")
+        if is_object_storage:
+            print(
+                f"[Worker] Staging PUT ok chunk={chunk_index} "
+                f"bytes={len(data)} etag={etag!r}"
+            )
+        return (True, etag, response.status_code)
+
     for attempt in range(MAX_RETRIES):
         try:
-            if is_object_storage:
-                response = await client.put(
-                    destination_url, content=data, headers=headers, timeout=SEND_TIMEOUT
-                )
-            else:
-                response = await client.post(
-                    destination_url, content=data, headers=headers, timeout=SEND_TIMEOUT
-                )
-
-            response.raise_for_status()
-            etag = response.headers.get("ETag") or response.headers.get("etag")
-            if is_object_storage:
-                print(
-                    f"[Worker] Staging PUT ok chunk={chunk_index} "
-                    f"bytes={len(data)} etag={etag!r}"
-                )
-            return (True, etag, response.status_code)
+            return await asyncio.wait_for(_do_send(), timeout=CHUNK_ATTEMPT_TIMEOUT)
 
         except Exception as e:
             # Presigned object-storage 404s may be transient Cloudflare routing issues.
@@ -805,8 +815,9 @@ async def stream_fetch_and_send(
             fetch_ms = (time.perf_counter() - chunk_started) * 1000
 
         try:
-            response = await client.put(
-                destination_url, content=body_stream(), headers=dest_headers, timeout=SEND_TIMEOUT
+            response = await asyncio.wait_for(
+                client.put(destination_url, content=body_stream(), headers=dest_headers, timeout=SEND_TIMEOUT),
+                timeout=CHUNK_ATTEMPT_TIMEOUT,
             )
             response.raise_for_status()
             etag = response.headers.get("ETag") or response.headers.get("etag")
